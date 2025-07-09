@@ -1,0 +1,396 @@
+desc:E-Goniometer400 (Windows-G)
+// tags: Stereo Field Analysis
+
+// Original framework from "JS Goniometer [LOSER]" (Copyright (c) Michael Gruhn)  
+// Correlation & Balance Meters adapted from "Correlation meter [JM]" (MIT License, Copyright (c) 2023 Jozef Mackowiak)   
+
+// New Features and Enhancements by Windows-G (info.windowsg@gmail.com)
+
+//Released under MIT License:
+//Copyright (c) 2025 Windows-G
+//Permission is hereby granted, free of charge, to any person obtaining a copy
+//of this software and associated documentation files (the "Software"), to deal
+//in the Software without restriction, including without limitation the rights
+//to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//copies of the Software, and to permit persons to whom the Software is
+//furnished to do so, subject to the following conditions:
+
+//The above copyright notice and this permission notice shall be included in all
+//copies or substantial portions of the Software.
+
+//THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//SOFTWARE.
+
+slider1:1<0,2,1{Dots,Lines,Rays}>Display
+slider2:0.050<0,0.1,0.001>Fade Amount
+slider3:weight_ms=350<0,10000,1>-Weight [ms]
+slider4:bal_st=0<-100,100,0.01>Balance (%)
+slider5:cor_st=0<-1.0,1.0,0.001>Correlation (-1 to 1)
+slider6:0<-18,18,1.0>Visual Gain (dB)
+slider7:4<0,6,1{Green,Blue,Yellow,Purple,Cyan,White,Red}>Display Color
+
+in_pin:none
+out_pin:none
+
+@init
+ext_noinit=1; // retain max/min values when rendering offline
+gfx_clear=-1;
+off = 500000;
+rot=-45*0.017453292;
+DOTS = 0;
+LINES = 1;
+RAYS = 2;
+MAXDRAWSPLS = 10000;
+PHASEUPDATERATE = srate/8;
+n = 0;
+phC = 0;
+ph = 0;
+
+gain = 1; // Set initial gain to 0 dB (1.0 = 0 dB)
+
+// Max/Min values
+max_bal_neg = 0;
+max_bal_pos = 0;
+
+max_cor_pos = 0;
+
+min_cor = 0;
+// Track negative and positive correlation minimums separately:
+min_cor_neg = 0; // Initialize to minimum possible negative correlation 
+min_cor_pos = 1; // Initialize to maximum possible positive correlation
+cor_epsilon = 0.001; // Small threshold to detect when correlation is effectively zero
+
+// CORRELATION/BALANCE===============================================================
+invpidiv2 = 1/($pi * 0.5);
+
+// RMS function with smoothing
+function rms_init(weight_ms)
+  instance(weight)(
+    weight = 1 - exp(-1 / (weight_ms / 1000 * srate));
+);
+
+function rms(input)
+  instance(s, rms, weight)(
+    rms = (s += weight * (input^2 - s));
+);
+
+// Initialize RMS instances
+m.rms_init(weight_ms);
+s.rms_init(weight_ms);
+l.rms_init(weight_ms);
+r.rms_init(weight_ms);
+//===================================================================================
+
+
+@slider
+slider6 = min(max(slider6, -18), 18); // Apply limits to Visual Gain slider
+gain = 10^(slider6/20);
+
+// CORRELATION/BALANCE===============================================================
+m.rms_init(weight_ms);
+s.rms_init(weight_ms);
+l.rms_init(weight_ms);
+r.rms_init(weight_ms);
+//===================================================================================
+
+@block
+
+@sample
+  
+  s0 = sign(spl0);
+  s1 = sign(spl1);
+  angle = atan(spl0 / spl1);
+  (s0 == 1 && s1 == -1) || (s0 == -1 && s1 == -1) ? angle += 3.141592654;
+  s0 == -1 && s1 == 1 ? angle += 6.283185307;
+  spl1 == 0 ? spl0 > 0 ? angle = 1.570796327 : angle = 4.71238898;
+  spl0 == 0 ? spl1 > 0 ? angle = 0 : angle = 3.141592654;
+  radius = sqrt(sqr(spl0) + sqr(spl1)) * (slider6 == 0 ? 1 : gain); // apply visual gain based on slider6
+  angle -= rot;
+  vert = 0[b] = cos(angle) * radius;
+  horiz = off[b] = sin(angle) * radius;
+  b < MAXDRAWSPLS ? b += 1;
+
+  s0 != s1 ? phC -= 1 : phC += 1;
+  (n += 1) > PHASEUPDATERATE ? (
+    ph = (1 - (phC / n)) / 2;
+    phC = n = 0;
+  );
+
+  // CORRELATION/BALANCE=============================================================//
+  m.rms((spl0 + spl1) * 0.5);  // Mid
+  s.rms((spl0 - spl1) * 0.5);  // Side
+  l.rms(spl0);                 // Left
+  r.rms(spl1);                 // Right
+
+  // Raw balance & correlation
+  // Used ternary operator to avoid division by zero during silence; 
+  // Thus, it sets cor/bal to 0 to prevent plugin crashes or errors
+  cor = (m.rms + s.rms == 0) ? 0 : (m.rms - s.rms) / (m.rms + s.rms); 
+  bal = (r.rms + l.rms == 0) ? 0 : (r.rms - l.rms) / (r.rms + l.rms);
+
+  // Scaled versions for balance & correlation sliders
+  cor_st = floor(asin(cor) * invpidiv2 * 100 + 0.5) / 100; // rounded to 2 decimal places for smooth slider movement
+  bal_st = floor(asin(bal) * invpidiv2 * 100 * 10 + 0.5) / 10; // Converted to % with 1 decimal place precision for smooth slider movement
+
+  // Update max balance values
+  bal_st < max_bal_neg ? max_bal_neg = bal_st;
+  bal_st > max_bal_pos ? max_bal_pos = bal_st;
+  
+  // Update max positive correlation
+  cor_st > max_cor_pos ? max_cor_pos = cor_st;
+  
+  // Update minimum correlation (catches most negative or lowest positive)
+  abs_cor = abs(cor_st); // Get absolute value for zero comparison
+  // Normal tracking for positive and negative values
+  cor_st <= 0 ? (
+    // For negative values: track most negative (lowest)
+    cor_st < min_cor_neg ? min_cor_neg = cor_st;
+  ) : (
+    // For positive values: track least positive (lowest)
+    cor_st < min_cor_pos ? min_cor_pos = cor_st;
+  );
+  // Special case for zero or near-zero
+  abs_cor < cor_epsilon ? (
+    // Near zero - update min_cor_pos to zero if currently tracking positive
+    min_cor_pos = min(min_cor_pos, 0);
+    // Don't override min_cor_neg if it's already negative
+    min_cor_neg > -cor_epsilon ? min_cor_neg = 0;
+  );
+  // Set min_cor for display based on whether negative value exists
+  min_cor_neg < 0 ? min_cor = min_cor_neg : min_cor = min_cor_pos;
+//=====END OF CORRELATION/BALANCE====================================================//
+
+@gfx 370 370
+
+// Add margins 
+top_margin = 30; // space at the top
+bottom_margin = 10; // space at the bottom
+size = min(gfx_w, gfx_h*.90 - top_margin - bottom_margin)|0;
+
+// override drawing functions to center horizontally only
+gxo = gfx_w*.5 - size*.5;
+function gfx_lineto(x,y,aa) ( gfx_x+=gxo; gfx_lineto(x+gxo,y,aa); gfx_x-=gxo; );
+function gfx_setpixel(r,g,b) ( gfx_x+=gxo; gfx_setpixel(r,g,b); gfx_x-=gxo; );
+function gfx_drawnumber(y,x) ( gfx_x+=gxo; gfx_w<200||gfx_drawnumber(y,x); gfx_x-=gxo; );
+function gfx_drawchar(x) (gfx_x+=gxo; gfx_w<200||gfx_drawchar(x); gfx_x-=gxo;);
+function gfx_drawstr(str) (gfx_x+=gxo; gfx_w<200||gfx_drawstr(str); gfx_x-=gxo;);
+
+sizeH = size/2;
+sizeDSqr05 = sizeH * 0.70710681;
+sizeQ = sizeH/2;
+size3Q = 3*sizeQ;
+
+// Mouse clicked - clear the screen
+(mouse_cap) ? (
+  gfx_r=gfx_g=gfx_b=0; gfx_a=1;
+  gfx_x=gfx_y=0;
+  gfx_rectto(gfx_w,gfx_h);
+  // Reset Max/Min variables
+  max_bal_neg = 0;
+  max_bal_pos = 0;
+  max_cor_pos = 0;
+  min_cor = 0;
+  min_cor_pos = 1;  
+  min_cor_neg = 0; 
+);
+
+// Apply fade effect
+gfx_r=gfx_g=gfx_b=0; gfx_a=slider2;
+gfx_x=gfx_y=0;
+gfx_rectto(gfx_w,gfx_h);
+
+// CIRCLE---LINES---AND---TITLES==================================================================================
+// Calculate the intersection point of L/R lines 
+intersectX = sizeH;
+intersectY = sizeH + top_margin;
+circle_radius = sizeH * 0.99;
+
+// === BIG CIRCLE CENTERED AT L/R INTERSECTION === //
+gfx_r=gfx_g=gfx_b=0.8; gfx_a=1;
+gfx_circle(intersectX + gxo, intersectY, circle_radius, 0);
+// === END OF CIRCLE CODE ======================= //
+
+// Tiltes---------------------------------------------------------------------------//
+// Draw max/min values on left and right sides
+gfx_setfont(1, "Arial", max(15, size * 0.04));  // font and dynamic font size; avoid increasing 0.04
+// Set dynamic font size that scales with plugin size but has a minimum of 15px
+// size * 0.04 = Font will be 4% of the plugin's size (good scaling ratio)
+// max(15,...) = Ensures font never gets smaller than 15px for readability
+
+// Calculate title widths
+title_width = 60;
+value_width = 40;
+
+// Define vertical spacing parameters that scale with size
+title_to_value_gap1 = max(18, size * 0.05);  
+title_to_value_gap2 = max(2, size * 0.006);  
+section_spacing = max(10, size * 0.06);  // Spacing between balance and correlation sections
+
+// Left Balance title (gray)
+gfx_r=gfx_g=gfx_b=0.8; gfx_a=1;
+gfx_x = intersectX - circle_radius - max(70, circle_radius*0.35); 
+gfx_y = intersectY - section_spacing - title_to_value_gap1;  
+gfx_drawstr("Max L Bal");
+// Left Balance value (uses slider7 color)
+slider7 == 0 ? (gfx_r=0.5; gfx_g=1; gfx_b=0;) :     // Green
+slider7 == 1 ? (gfx_r=0.2; gfx_g=0.8; gfx_b=1;) :   // Blue
+slider7 == 2 ? (gfx_r=1; gfx_g=1; gfx_b=0.2;) :     // Yellow
+slider7 == 3 ? (gfx_r=0.8; gfx_g=0.2; gfx_b=0.8;) : // Purple
+slider7 == 4 ? (gfx_r=0; gfx_g=0.9; gfx_b=0.9;) :   // Cyan
+slider7 == 5 ? (gfx_r=1; gfx_g=1; gfx_b=1;) :       // White
+(gfx_r=0.9; gfx_g=0.2; gfx_b=0.2;);                 // Red
+gfx_x = intersectX - circle_radius - max(70, circle_radius*0.35) + (title_width - value_width)/2;
+gfx_y = intersectY - section_spacing; 
+gfx_drawnumber(max_bal_neg, 1);
+gfx_drawchar($'%');
+
+// (Left) Minimum Correlation title (gray)
+gfx_r=gfx_g=gfx_b=0.8; gfx_a=1;
+gfx_x = intersectX - circle_radius - max(70, circle_radius*0.35);
+gfx_y = intersectY + title_to_value_gap2; 
+gfx_drawstr("Min Cor");
+// (Left) Minimum Correlation value (uses slider7 color)
+slider7 == 0 ? (gfx_r=0.5; gfx_g=1; gfx_b=0;) :     // Green
+slider7 == 1 ? (gfx_r=0.2; gfx_g=0.8; gfx_b=1;) :   // Blue
+slider7 == 2 ? (gfx_r=1; gfx_g=1; gfx_b=0.2;) :     // Yellow
+slider7 == 3 ? (gfx_r=0.8; gfx_g=0.2; gfx_b=0.8;) : // Purple
+slider7 == 4 ? (gfx_r=0; gfx_g=0.9; gfx_b=0.9;) :   // Cyan
+slider7 == 5 ? (gfx_r=1; gfx_g=1; gfx_b=1;) :       // White
+(gfx_r=0.9; gfx_g=0.2; gfx_b=0.2;);                 // Red
+gfx_x = intersectX - circle_radius - max(70, circle_radius*0.35) + (title_width - value_width)/2;
+gfx_y = intersectY + title_to_value_gap2 + title_to_value_gap1;
+gfx_drawnumber(min_cor, 2); //will be set to either "min_cor_neg" or "min_cor_pos" based on the logic at @sample
+
+// Right Balance title (gray)
+gfx_r=gfx_g=gfx_b=0.8; gfx_a=1;
+gfx_x = intersectX + circle_radius + max(10, circle_radius*0.15);
+gfx_y = intersectY - section_spacing - title_to_value_gap1;
+gfx_drawstr("Max R Bal");
+// Right Balance value (uses slider7 color)
+slider7 == 0 ? (gfx_r=0.5; gfx_g=1; gfx_b=0;) :     // Green
+slider7 == 1 ? (gfx_r=0.2; gfx_g=0.8; gfx_b=1;) :   // Blue
+slider7 == 2 ? (gfx_r=1; gfx_g=1; gfx_b=0.2;) :     // Yellow
+slider7 == 3 ? (gfx_r=0.8; gfx_g=0.2; gfx_b=0.8;) : // Purple
+slider7 == 4 ? (gfx_r=0; gfx_g=0.9; gfx_b=0.9;) :   // Cyan
+slider7 == 5 ? (gfx_r=1; gfx_g=1; gfx_b=1;) :       // White
+(gfx_r=0.9; gfx_g=0.2; gfx_b=0.2;);                 // Red
+gfx_x = intersectX + circle_radius + max(10, circle_radius*0.15) + (title_width - value_width)/2;
+gfx_y = intersectY - section_spacing;
+gfx_drawnumber(max_bal_pos, 1);
+gfx_drawchar($'%');
+
+// (Right) Maximum Correlation title (gray) 
+gfx_r=gfx_g=gfx_b=0.8; gfx_a=1;
+gfx_x = intersectX + circle_radius + max(10, circle_radius*0.15);
+gfx_y = intersectY + title_to_value_gap2;
+gfx_drawstr("Max Cor");
+// (Right) Maximum Correlation value (uses slider7 color)
+slider7 == 0 ? (gfx_r=0.5; gfx_g=1; gfx_b=0;) :     // Green
+slider7 == 1 ? (gfx_r=0.2; gfx_g=0.8; gfx_b=1;) :   // Blue
+slider7 == 2 ? (gfx_r=1; gfx_g=1; gfx_b=0.2;) :     // Yellow
+slider7 == 3 ? (gfx_r=0.8; gfx_g=0.2; gfx_b=0.8;) : // Purple
+slider7 == 4 ? (gfx_r=0; gfx_g=0.9; gfx_b=0.9;) :   // Cyan
+slider7 == 5 ? (gfx_r=1; gfx_g=1; gfx_b=1;) :       // White
+(gfx_r=0.9; gfx_g=0.2; gfx_b=0.2;);                 // Red
+gfx_x = intersectX + circle_radius + max(10, circle_radius*0.15) + (title_width - value_width)/2;
+gfx_y = intersectY + title_to_value_gap2 + title_to_value_gap1;
+gfx_drawnumber(max_cor_pos, 2);
+
+// Draw "Click to Reset" text centered at bottom
+gfx_r=gfx_g=gfx_b=0.8; gfx_a=1;
+gfx_x = intersectX - (gfx_texth/0.40); 
+gfx_y = intersectY + circle_radius + (letter_size * 0.4);  
+gfx_drawstr("Click to Reset");
+//---------END OF TITLES CODE-------------------------------------------------------//
+
+// DRAW THE LINES============================================================//
+// Lines that touch the circle exactly
+gfx_r=gfx_g=gfx_b=0.8; gfx_a=1; //color & transparency
+
+// Calculate where lines should touch the circle
+centerY_top = intersectY - circle_radius * 0.99;
+centerY_bottom = intersectY + circle_radius; 
+diag_offset = circle_radius * 0.7071;
+
+// Center line (vertical)
+gfx_x=sizeH; gfx_y=centerY_top;
+gfx_lineto(sizeH,centerY_bottom,0);
+
+// Left diagonal (L) - from top-left to bottom-right
+gfx_x=intersectX - diag_offset*0.99; gfx_y=intersectY - diag_offset*0.99;
+gfx_lineto(intersectX + diag_offset,intersectY + diag_offset,0);
+
+// Right diagonal (R) - from top-right to bottom-left
+gfx_x=intersectX + diag_offset; gfx_y=intersectY - diag_offset;
+gfx_lineto(intersectX - diag_offset,intersectY + diag_offset,0);
+//=====END OF LINES CODE=============================-=======================//
+
+// LCR Positioning at Top of Circle =============================================================//
+letter_size = max(15, size * 0.05);
+letter_margin = max(6, circle_radius * 0.05);
+
+// C position (center top)
+gfx_x = sizeH - letter_size/4;
+gfx_y = intersectY - circle_radius - (letter_size * 1.0); 
+gfx_drawchar($'C');
+
+// L position (top left diagonal)
+gfx_x = intersectX - diag_offset - (letter_size * 0.6); 
+gfx_y = intersectY - diag_offset - letter_size + (letter_margin * 0.3); 
+gfx_drawchar($'L');
+
+// R position (top right diagonal)
+gfx_x = intersectX + diag_offset + letter_margin * 0.5;
+gfx_y = intersectY - diag_offset - letter_size + (letter_margin * 0.3); 
+gfx_drawchar($'R');
+//=====END OF LCR Positioning CODE===============================================================//
+//================================================================================================================
+
+// Draw the scope on top
+x = y = sizeH;
+y += top_margin;
+
+i = min(b,MAXDRAWSPLS);
+while (
+  slider1 == DOTS ? (
+  gfx_a=1;
+  gfx_x=sizeH+0[i]*sizeDSqr05;
+  gfx_y=sizeH-off[i]*sizeDSqr05 + top_margin;
+  // Set color based on slider7 value
+  slider7 == 0 ? (gfx_r=0.5; gfx_g=1; gfx_b=0;) :     // Green
+  slider7 == 1 ? (gfx_r=0.2; gfx_g=0.8; gfx_b=1;) :   // Blue
+  slider7 == 2 ? (gfx_r=1; gfx_g=1; gfx_b=0.2;) :     // Yellow
+  slider7 == 3 ? (gfx_r=0.8; gfx_g=0.2; gfx_b=0.8;) : // Purple
+  slider7 == 4 ? (gfx_r=0; gfx_g=0.9; gfx_b=0.9;) :   // Cyan
+  slider7 == 5 ? (gfx_r=1; gfx_g=1; gfx_b=1;) :       // White
+  (gfx_r=0.9; gfx_g=0.2; gfx_b=0.2;);                 // Red
+  gfx_setpixel(gfx_r,gfx_g,gfx_b);
+  ):(
+    slider1 == LINES ? (
+      gfx_x=x; gfx_y=y;
+      x=sizeH+0[i]*sizeDSqr05;
+      y=sizeH-off[i]*sizeDSqr05 + top_margin;
+    ):(
+      gfx_x=sizeH+0[i]*sizeDSqr05;
+      gfx_y=sizeH-off[i]*sizeDSqr05 + top_margin;
+    );
+    // Set color based on slider7 value
+    slider7 == 0 ? (gfx_r=0.5; gfx_g=1; gfx_b=0;) :     // Green
+    slider7 == 1 ? (gfx_r=0.2; gfx_g=0.8; gfx_b=1;) :   // Blue
+    slider7 == 2 ? (gfx_r=1; gfx_g=1; gfx_b=0.2;) :     // Yellow
+    slider7 == 3 ? (gfx_r=0.8; gfx_g=0.2; gfx_b=0.8;) : // Purple
+    slider7 == 4 ? (gfx_r=0; gfx_g=0.9; gfx_b=0.9;) :   // Cyan
+    slider7 == 5 ? (gfx_r=1; gfx_g=1; gfx_b=1;) :       // White
+    (gfx_r=0.9; gfx_g=0.2; gfx_b=0.2;);                 // Red
+    gfx_a=0.6;
+  gfx_lineto(x,y,0);
+  );
+  (i-=1)>0;
+);
+b=0;
+
