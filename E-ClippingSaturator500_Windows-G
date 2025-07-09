@@ -1,0 +1,345 @@
+desc:E-ClippingSaturator500 (Windows-G)
+//author: Windows-G (info.windowsg@gmail.com)
+//provides: soft & hard clipping saturator
+
+//License: Proprietary (This JSFX plugin and its source code are the proprietary intellectual property of Windows-G)
+
+//Copyright (c) 2025 Windows-G. All rights not expressly granted herein are reserved.
+
+//Permitted Use:
+    // 1. The purchaser is granted a non-exclusive, non-transferable license to use this plugin on any computer(s) 
+    they own for their personal or commercial audio production needs.
+    // 2. The purchaser may edit the source code to fit their specific workflow or needs.
+
+//Prohibited Action:
+    // This plugin, its source code, or any modified versions thereof, may NOT be shared, distributed, resold, or 
+    otherwise transferred to any third party, whether for free or for sale.
+
+//Disclaimer of Warranty and Limitation of Liability:
+//THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//SOFTWARE.
+
+//By using this plugin, you agree to the terms of this Proprietary License.
+
+slider1:0<0,2,1{Stereo,Mid,Side}>Channel Mode
+slider2:0<-30,30,0.1>Input Gain (dB)
+slider3:0<0,100,0.1:log=30>Soft Clipping Saturation (%)
+slider4:0<0,100,0.1:log=30>Hard Clipping Saturation (%)
+slider5:100<0,100,1>Dry/Wet (%)
+slider6:0<-30,30,0.1>Output Gain (dB)
+slider7:1<0,1,1{Off,On}>DC Filter (1 Hz)
+slider8:0<0,1,1{Off,On}>Link Input and Output Gain
+
+@init
+input_gain = 10^(slider2/20); // decibels (dB) to linear gain
+current_input_gain = input_gain; // to prevent zipper noise
+output_gain = 10^(slider6/20); // decibels (dB) to linear gain
+current_output_gain = output_gain; // to prevent zipper noise
+
+// Initialize smoothing variables (to prevent zipper noise from real-time adjustments)
+current_soft_amount = soft_amount = slider3;
+current_hard_amount = hard_amount = slider4;
+current_dry_wet = dry_wet = slider5;
+
+// Store previous values for link controls
+prev_slider2 = 0;
+prev_slider6 = 0;
+prev_slider8 = 0;
+
+// Track if links are newly enabled
+input_output_link_initialized = 0;
+
+// Store offset values for linked controls
+input_output_offset = 0;
+
+// Track if a reset has occurred
+reset_occurred_input_output = 0;
+
+// Fixed 12dB/oct Butterworth HPF at 1Hz
+hpf_freq = 1; // Fixed cutoff frequency (1hz)
+hpf_Q = 0.707; // Butterworth Q
+hpf_w0 = 2 * $pi * hpf_freq / srate;
+hpf_cosw0 = cos(hpf_w0);
+hpf_sinw0 = sin(hpf_w0);
+hpf_alpha = hpf_sinw0 / (2 * hpf_Q);
+
+// Calculate HPF coefficients (2 sections for 12dB/oct)
+hpf_b0 = (1 + hpf_cosw0)/2;
+hpf_b1 = -(1 + hpf_cosw0);
+hpf_b2 = (1 + hpf_cosw0)/2;
+hpf_a0 = 1 + hpf_alpha;
+hpf_a1 = -2 * hpf_cosw0;
+hpf_a2 = 1 - hpf_alpha;
+
+// Normalize coefficients
+hpf_b0 /= hpf_a0;
+hpf_b1 /= hpf_a0;
+hpf_b2 /= hpf_a0;
+hpf_a1 /= hpf_a0;
+hpf_a2 /= hpf_a0;
+
+// Filter state variables (2 sections for stereo)
+hpf_x1l = hpf_x2l = hpf_y1l = hpf_y2l = 0;
+hpf_x1r = hpf_x2r = hpf_y1r = hpf_y2r = 0;
+
+
+//Generate clipping saturation========================================================================================================
+function process_soft_clipping(x, amount) local(drive, y, compensation) (
+  amount <= 0 ? x : (
+    drive = 1 + (amount * 0.01) * 9; // Drive: increasing 9 makes clipping kicks in faster + more harmonics. 
+    y = x * drive;
+    // Soft clipping using tanh approximation: tanh(x) ≈ x / (1 + abs(x))
+    y = y / (1 + abs(y));
+    compensation = 1.0 - (amount * 0.01) * 0.8; // Level Compensation: Increasing 0.8 produces more level reduction at high settings
+    (x + (y - x) * (amount * 0.01)) * compensation;
+  );
+);
+
+function process_hard_clipping(x, amount) local(threshold, y, compensation) (
+  amount <= 0 ? x : (
+    threshold = 0.05 - (amount * 0.01) * 0.02; // Threshold: Increasing 0.05 = need high level input; decreasing 0.05 = more sensitive
+                                              //  Increasing 0.02 = bigger difference between 0% and 100% slider (more dramatic)
+    y = x;
+    // Hard clipping
+    y > threshold ? y = threshold;
+    y < -threshold ? y = -threshold;
+    compensation = 1.0 + (amount * 0.01) * 0.7; // Level Compensation: Increasing 0.7 produces more level boost at high settings
+    (x + (y - x) * (amount * 0.01)) * compensation;
+  );
+);
+//====================================================================================================================================
+
+@slider
+// Store original values to detect which slider changed
+last_changed = -1;
+
+slider2 != prev_slider2 ? last_changed = 2;
+slider6 != prev_slider6 ? last_changed = 6;
+slider8 != prev_slider8 ? last_changed = 8;
+
+slider2 = min(max(slider2, -30), 30); // Apply limits to Input Gain slider
+slider3 = min(max(slider3, 0), 100); // Apply limits to Soft Clipping Saturation slider
+slider4 = min(max(slider4, 0), 100); // Apply limits to Hard Clipping Saturation slider
+slider5 = min(max(slider5, 0), 100); // Apply limits to Dry/Wet slider
+slider6 = min(max(slider6, -30), 30); // Apply limits to Output Gain slider
+
+// Handle linking for input/output gain
+slider8 == 1 ? (
+  // Initialize the offset when link is first enabled
+  prev_slider8 == 0 ? (
+    input_output_offset = slider6 - (-slider2);
+    input_output_link_initialized = 1;
+  );
+  
+  // Check for double-click reset (value exactly 0)
+  slider2 == 0 && last_changed == 2 && prev_slider2 != 0 ? (
+    slider6 = 0; // Both go to zero regardless of offset
+    reset_occurred_input_output = 1; // Flag that we've reset
+    input_output_offset = 0; // Reset the offset
+  ) : 
+  slider6 == 0 && last_changed == 6 && prev_slider6 != 0 ? (
+    slider2 = 0; // Both go to zero regardless of offset
+    reset_occurred_input_output = 1; // Flag that we've reset
+    input_output_offset = 0; // Reset the offset
+  ) :
+  // Normal case - maintain offset with inverse relationship
+  last_changed == 2 ? (
+    slider6 = -slider2 + input_output_offset;
+  ) : 
+  last_changed == 6 ? (
+    slider2 = -(slider6 - input_output_offset);
+  );
+) : (
+  // If linking was just disabled, store the current values
+  input_output_link_initialized = 0;
+  reset_occurred_input_output = 0;
+);
+
+// Update stored values
+prev_slider2 = slider2;
+prev_slider6 = slider6;
+prev_slider8 = slider8;
+
+input_gain = 10^(slider2/20);
+soft_amount = slider3;
+hard_amount = slider4;
+dry_wet = slider5;
+output_gain = 10^(slider6/20);
+dc_filter = slider7;
+
+@block
+// Smooth Input Gain transitions
+input_gain_step = (input_gain - current_input_gain)/samplesblock;
+smoothed_input_gain = current_input_gain;  
+current_input_gain = input_gain;           
+
+// Smooth Output Gain transitions
+output_gain_step = (output_gain - current_output_gain)/samplesblock;
+smoothed_output_gain = current_output_gain;  
+current_output_gain = output_gain;  
+
+// Smooth soft clipping amount transitions
+soft_amount_step = (soft_amount - current_soft_amount)/samplesblock;
+smoothed_soft_amount = current_soft_amount;
+current_soft_amount = soft_amount;
+
+// Smooth hard clipping amount transitions
+hard_amount_step = (hard_amount - current_hard_amount)/samplesblock;
+smoothed_hard_amount = current_hard_amount;
+current_hard_amount = hard_amount;
+
+// Smooth dry/wet amount transitions
+dry_wet_step = (dry_wet - current_dry_wet)/samplesblock;
+smoothed_dry_wet = current_dry_wet;
+current_dry_wet = dry_wet;
+
+@sample
+// Store original samples
+spl0_orig = spl0;
+spl1_orig = spl1;
+
+// === Input Gain ===
+// Smooth input gain to prevent zipper noise from real-time adjustments
+smoothed_input_gain += input_gain_step;
+// Apply smoothed input gain
+spl0 *= smoothed_input_gain;
+spl1 *= smoothed_input_gain;
+
+// Store dry signal after input gain
+spl0_dry = spl0;
+spl1_dry = spl1;
+
+// Compute mid/side signals
+mid = (spl0 + spl1) * 0.5;
+side = (spl0 - spl1) * 0.5;
+
+// Smooth soft and hard clipping amount to prevent zipper noise
+smoothed_soft_amount += soft_amount_step;
+smoothed_hard_amount += hard_amount_step;
+
+
+// Process clipping based on the channel mode
+channel_mode = slider1;
+
+// Stereo mode (process both channels separately)
+channel_mode == 0 ? (
+  // Apply soft clipping first
+  spl0 = smoothed_soft_amount > 0 ? process_soft_clipping(spl0, smoothed_soft_amount) : spl0;
+  spl1 = smoothed_soft_amount > 0 ? process_soft_clipping(spl1, smoothed_soft_amount) : spl1;
+  
+  // Then apply hard clipping
+  spl0 = smoothed_hard_amount > 0 ? process_hard_clipping(spl0, smoothed_hard_amount) : spl0;
+  spl1 = smoothed_hard_amount > 0 ? process_hard_clipping(spl1, smoothed_hard_amount) : spl1;
+) : 
+
+// Mid mode (process only mid signal)
+channel_mode == 1 ? (
+  // Apply soft clipping first
+  mid = smoothed_soft_amount > 0 ? process_soft_clipping(mid, smoothed_soft_amount) : mid;
+  
+  // Then apply hard clipping
+  mid = smoothed_hard_amount > 0 ? process_hard_clipping(mid, smoothed_hard_amount) : mid;
+  
+  // Reconstruct stereo signal
+  spl0 = mid + side;
+  spl1 = mid - side;
+) : 
+
+// Side mode (process only side signal)
+channel_mode == 2 ? (
+  // Apply soft clipping first
+  side = smoothed_soft_amount > 0 ? process_soft_clipping(side, smoothed_soft_amount) : side;
+  
+  // Then apply hard clipping
+  side = smoothed_hard_amount > 0 ? process_hard_clipping(side, smoothed_hard_amount) : side;
+  
+  // Reconstruct stereo signal
+  spl0 = mid + side;
+  spl1 = mid - side;
+);
+
+// Apply 12dB/oct Butterworth high-pass filter if enabled
+dc_filter ? (
+  // Left channel
+  hpf_y0 = hpf_b0 * spl0 + hpf_b1 * hpf_x1l + hpf_b2 * hpf_x2l 
+                 - hpf_a1 * hpf_y1l - hpf_a2 * hpf_y2l;
+  hpf_x2l = hpf_x1l;
+  hpf_x1l = spl0;
+  hpf_y2l = hpf_y1l;
+  hpf_y1l = hpf_y0;
+  spl0 = hpf_y0;
+
+  // Right channel
+  hpf_y0 = hpf_b0 * spl1 + hpf_b1 * hpf_x1r + hpf_b2 * hpf_x2r 
+                 - hpf_a1 * hpf_y1r - hpf_a2 * hpf_y2r;
+  hpf_x2r = hpf_x1r;
+  hpf_x1r = spl1;
+  hpf_y2r = hpf_y1r;
+  hpf_y1r = hpf_y0;
+  spl1 = hpf_y0;
+);
+
+// === Dry/Wet Mix ===
+// Smooth dry/wet to prevent zipper noise from real-time adjustments
+smoothed_dry_wet += dry_wet_step;
+// Mix dry and wet signals
+wet_amount = smoothed_dry_wet * 0.01;
+dry_amount = 1.0 - wet_amount;
+spl0 = spl0_dry * dry_amount + spl0 * wet_amount;
+spl1 = spl1_dry * dry_amount + spl1 * wet_amount;
+
+// === Output Gain ===
+// Smooth output gain to prevent zipper noise from real-time adjustments
+smoothed_output_gain += output_gain_step;
+// Apply smoothed output gain
+spl0 *= smoothed_output_gain;
+spl1 *= smoothed_output_gain;
+
+@gfx 450 40
+
+// Clear background
+gfx_clear = 0x101010;
+
+// Set default text color (light gray)
+gfx_r = 0.9; gfx_g = 0.9; gfx_b = 0.9; gfx_a = 1;
+
+// Draw labels: 
+gfx_x = 13; gfx_y = 7;
+gfx_drawstr("Soft Clipping");
+//----------------------
+gfx_x = 155; gfx_y = 7;
+gfx_drawstr("Hard Clipping");
+//---------------------
+
+function draw_indicator_box1(x, y, is_active)
+(
+  // Set rectangle color (based on active status)
+  is_active ? (
+    gfx_r = 0; gfx_g = 0.8; gfx_b = 0.8; // Cyan for active
+  ) : (
+    gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.3; // Dark gray for inactive
+  );
+  // Draw rectangle below the label
+  gfx_rect(x, y + 15, 60, 10);
+);
+
+function draw_indicator_box2(x, y, is_active)
+(
+  // Set rectangle color (based on active status)
+  is_active ? (
+    gfx_r = 0.8; gfx_g = 0.1; gfx_b = 0.1; // Red for active
+  ) : (
+    gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.3; // Dark gray for inactive
+  );
+  // Draw rectangle below the label
+  gfx_rect(x, y + 15, 60, 10);
+);
+
+// Call the functions to draw the indicator boxes 
+draw_indicator_box1(13, 7, slider3 > 0); 
+draw_indicator_box2(155, 7, slider4 > 0);
